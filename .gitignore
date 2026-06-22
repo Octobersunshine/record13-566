@@ -6,3 +6,7 @@ Cargo.lock
 *.db-journal
 medical_chat.db
 medical_chat.db-*
+
+uploads/*
+!uploads/.gitkeep
+!uploads/**/.gitkeep

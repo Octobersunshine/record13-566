@@ -1,17 +1,20 @@
+use std::sync::Arc;
+
 use axum::{
-    extract::{Query, State},
+    extract::{Multipart, Query, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
 use serde::{Deserialize, Serialize};
-use sqlx::SqlitePool;
-use tracing::error;
+use tracing::{error, info};
 use uuid::Uuid;
 
+use crate::AppState;
 use crate::db::{
     ChatMessage, CreateMessageRequest, PaginatedMessages,
     get_message_by_id, get_messages_by_consultation, save_message,
 };
+use crate::upload::{UploadedFile, save_uploaded_file};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ApiResponse<T> {
@@ -66,7 +69,7 @@ fn validate_create_request(req: &CreateMessageRequest) -> Result<(), String> {
 }
 
 pub async fn create_message(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     Json(req): Json<CreateMessageRequest>,
 ) -> impl IntoResponse {
     if let Err(err_msg) = validate_create_request(&req) {
@@ -76,7 +79,7 @@ pub async fn create_message(
         );
     }
 
-    match save_message(&pool, &req).await {
+    match save_message(&state.pool, &req).await {
         Ok(message) => (
             StatusCode::CREATED,
             Json(ApiResponse::success(message)),
@@ -92,7 +95,7 @@ pub async fn create_message(
 }
 
 pub async fn list_messages(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     axum::extract::Path(consultation_id): axum::extract::Path<String>,
     Query(query): Query<PaginationQuery>,
 ) -> impl IntoResponse {
@@ -119,7 +122,7 @@ pub async fn list_messages(
         );
     }
 
-    match get_messages_by_consultation(&pool, &consultation_id, page, page_size).await {
+    match get_messages_by_consultation(&state.pool, &consultation_id, page, page_size).await {
         Ok(paginated) => (
             StatusCode::OK,
             Json(ApiResponse::success(paginated)),
@@ -135,7 +138,7 @@ pub async fn list_messages(
 }
 
 pub async fn get_message(
-    State(pool): State<SqlitePool>,
+    State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if id.trim().is_empty() {
@@ -152,7 +155,7 @@ pub async fn get_message(
         );
     }
 
-    match get_message_by_id(&pool, &id).await {
+    match get_message_by_id(&state.pool, &id).await {
         Ok(Some(message)) => (
             StatusCode::OK,
             Json(ApiResponse::success(message)),
@@ -176,4 +179,67 @@ pub async fn health_check() -> impl IntoResponse {
         StatusCode::OK,
         Json(ApiResponse::success(serde_json::json!({ "status": "ok" }))),
     )
+}
+
+pub async fn upload_image(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> impl IntoResponse {
+    let mut uploaded_files: Vec<UploadedFile> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    while let Some(field) = multipart.next_field().await.unwrap_or(None) {
+        let field_name = field.name().unwrap_or("file").to_string();
+        let file_name = field.file_name().unwrap_or("unknown").to_string();
+        let content_type = field.content_type().unwrap_or("application/octet-stream").to_string();
+
+        info!(
+            "收到上传请求: field={}, filename={}, content_type={}",
+            field_name, file_name, content_type
+        );
+
+        match save_uploaded_file(&state.upload_config, &field_name, &file_name, &content_type, field).await {
+            Ok(uploaded) => {
+                info!(
+                    "文件上传成功: {}, size={} bytes, url={}",
+                    uploaded.original_name, uploaded.size, uploaded.access_url
+                );
+                uploaded_files.push(uploaded);
+            }
+            Err(e) => {
+                error!("文件上传失败: {} - {}", file_name, e);
+                errors.push(format!("{}: {}", file_name, e));
+            }
+        }
+    }
+
+    if uploaded_files.is_empty() {
+        return (
+            if errors.is_empty() { StatusCode::BAD_REQUEST } else { StatusCode::BAD_REQUEST },
+            Json(ApiResponse::<Vec<UploadedFile>>::error(
+                400,
+                if errors.is_empty() {
+                    "未找到上传的文件".to_string()
+                } else {
+                    errors.join("; ")
+                },
+            )),
+        );
+    }
+
+    if !errors.is_empty() {
+        (
+            StatusCode::MULTI_STATUS,
+            Json(ApiResponse {
+                code: 207,
+                message: format!("部分文件上传成功，{} 个失败: {}", errors.len(), errors.join("; ")),
+                data: Some(uploaded_files),
+            }),
+        )
+    } else {
+        (
+            StatusCode::OK,
+            Json(ApiResponse::success(uploaded_files)),
+        )
+    }
 }
