@@ -11,8 +11,9 @@ use uuid::Uuid;
 
 use crate::AppState;
 use crate::db::{
-    ChatMessage, CreateMessageRequest, PaginatedMessages,
-    get_message_by_id, get_messages_by_consultation, save_message,
+    ChatMessage, ConsultationSummary, CreateMessageRequest, CreateSummaryRequest, PaginatedMessages,
+    get_all_messages_for_summary, get_message_by_id, get_messages_by_consultation,
+    get_summary_by_consultation, save_message, save_summary,
 };
 use crate::upload::{UploadedFile, save_uploaded_file};
 
@@ -241,5 +242,145 @@ pub async fn upload_image(
             StatusCode::OK,
             Json(ApiResponse::success(uploaded_files)),
         )
+    }
+}
+
+pub async fn create_summary(
+    State(state): State<AppState>,
+    Json(req): Json<CreateSummaryRequest>,
+) -> impl IntoResponse {
+    if req.consultation_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<ConsultationSummary>::error(400, "问诊ID不能为空")),
+        );
+    }
+
+    let force_regenerate = req.force_regenerate.unwrap_or(false);
+
+    if !force_regenerate {
+        match get_summary_by_consultation(&state.pool, &req.consultation_id).await {
+            Ok(Some(existing)) => {
+                info!(
+                    "问诊 {} 已有小结，直接返回（force_regenerate=false）",
+                    req.consultation_id
+                );
+                return (
+                    StatusCode::OK,
+                    Json(ApiResponse::success(existing)),
+                );
+            }
+            Err(e) => {
+                error!("查询已有小结失败: {}", e);
+            }
+            _ => {}
+        }
+    }
+
+    info!("开始为问诊 {} 生成小结", req.consultation_id);
+
+    let messages = match get_all_messages_for_summary(&state.pool, &req.consultation_id).await {
+        Ok(msgs) if msgs.is_empty() => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::<ConsultationSummary>::error(
+                    400,
+                    format!("问诊 {} 暂无对话消息，无法生成小结", req.consultation_id),
+                )),
+            );
+        }
+        Ok(msgs) => msgs,
+        Err(e) => {
+            error!("查询对话消息失败: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<ConsultationSummary>::error(
+                    500,
+                    format!("查询对话消息失败: {}", e),
+                )),
+            );
+        }
+    };
+
+    let message_count = messages.len() as i64;
+    info!("获取到 {} 条对话消息，开始生成摘要", message_count);
+
+    let (summary_content, generated_by) = match state.summary_service.generate_summary(&messages).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("生成摘要失败: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<ConsultationSummary>::error(
+                    500,
+                    format!("生成小结失败: {}", e),
+                )),
+            );
+        }
+    };
+
+    match save_summary(
+        &state.pool,
+        &req.consultation_id,
+        &summary_content,
+        &generated_by,
+        message_count,
+    ).await {
+        Ok(summary) => {
+            info!(
+                "问诊 {} 小结生成成功，生成方式: {}",
+                req.consultation_id, generated_by
+            );
+            (
+                StatusCode::CREATED,
+                Json(ApiResponse::success(summary)),
+            )
+        }
+        Err(e) => {
+            error!("保存小结失败: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<ConsultationSummary>::error(
+                    500,
+                    format!("保存小结失败: {}", e),
+                )),
+            )
+        }
+    }
+}
+
+pub async fn get_summary(
+    State(state): State<AppState>,
+    axum::extract::Path(consultation_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if consultation_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::<ConsultationSummary>::error(400, "问诊ID不能为空")),
+        );
+    }
+
+    match get_summary_by_consultation(&state.pool, &consultation_id).await {
+        Ok(Some(summary)) => (
+            StatusCode::OK,
+            Json(ApiResponse::success(summary)),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::<ConsultationSummary>::error(
+                404,
+                format!("问诊 {} 暂无小结，请先调用生成接口", consultation_id),
+            )),
+        ),
+        Err(e) => {
+            error!("查询小结失败: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::<ConsultationSummary>::error(
+                    500,
+                    format!("查询小结失败: {}", e),
+                )),
+            )
+        }
     }
 }

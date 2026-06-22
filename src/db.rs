@@ -260,3 +260,209 @@ pub async fn get_message_by_id(
 
     Ok(message)
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ConsultationSummary {
+    pub id: String,
+    pub consultation_id: String,
+    pub chief_complaint: String,
+    pub present_illness: String,
+    pub diagnosis: String,
+    pub treatment_plan: String,
+    pub doctor_advice: String,
+    pub key_points: String,
+    pub generated_by: String,
+    pub message_count: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSummaryRequest {
+    pub consultation_id: String,
+    pub force_regenerate: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryContent {
+    pub chief_complaint: String,
+    pub present_illness: String,
+    pub diagnosis: String,
+    pub treatment_plan: String,
+    pub doctor_advice: String,
+    pub key_points: String,
+}
+
+pub async fn init_summary_table(pool: &SqlitePool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS consultation_summaries (
+            id TEXT PRIMARY KEY,
+            consultation_id TEXT NOT NULL UNIQUE,
+            chief_complaint TEXT NOT NULL DEFAULT '',
+            present_illness TEXT NOT NULL DEFAULT '',
+            diagnosis TEXT NOT NULL DEFAULT '',
+            treatment_plan TEXT NOT NULL DEFAULT '',
+            doctor_advice TEXT NOT NULL DEFAULT '',
+            key_points TEXT NOT NULL DEFAULT '',
+            generated_by TEXT NOT NULL DEFAULT 'template',
+            message_count INTEGER NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL,
+            updated_at DATETIME NOT NULL
+        )
+        "#
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_consultation_summaries_consultation_id ON consultation_summaries (consultation_id)"
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_consultation_summaries_created_at ON consultation_summaries (created_at)"
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn save_summary(
+    pool: &SqlitePool,
+    consultation_id: &str,
+    content: &SummaryContent,
+    generated_by: &str,
+    message_count: i64,
+) -> Result<ConsultationSummary, sqlx::Error> {
+    let now = Utc::now();
+
+    let existing = sqlx::query_as::<_, (String,)>(
+        "SELECT id FROM consultation_summaries WHERE consultation_id = ?"
+    )
+    .bind(consultation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    let summary = if let Some((existing_id,)) = existing {
+        sqlx::query(
+            r#"
+            UPDATE consultation_summaries SET
+                chief_complaint = ?,
+                present_illness = ?,
+                diagnosis = ?,
+                treatment_plan = ?,
+                doctor_advice = ?,
+                key_points = ?,
+                generated_by = ?,
+                message_count = ?,
+                updated_at = ?
+            WHERE id = ?
+            "#
+        )
+        .bind(&content.chief_complaint)
+        .bind(&content.present_illness)
+        .bind(&content.diagnosis)
+        .bind(&content.treatment_plan)
+        .bind(&content.doctor_advice)
+        .bind(&content.key_points)
+        .bind(generated_by)
+        .bind(message_count)
+        .bind(now)
+        .bind(&existing_id)
+        .execute(pool)
+        .await?;
+
+        sqlx::query_as::<_, ConsultationSummary>(
+            r#"
+            SELECT id, consultation_id, chief_complaint, present_illness,
+                   diagnosis, treatment_plan, doctor_advice, key_points,
+                   generated_by, message_count, created_at, updated_at
+            FROM consultation_summaries WHERE id = ?
+            "#
+        )
+        .bind(&existing_id)
+        .fetch_one(pool)
+        .await?
+    } else {
+        let id = Uuid::new_v4().to_string();
+        sqlx::query(
+            r#"
+            INSERT INTO consultation_summaries (
+                id, consultation_id, chief_complaint, present_illness,
+                diagnosis, treatment_plan, doctor_advice, key_points,
+                generated_by, message_count, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#
+        )
+        .bind(&id)
+        .bind(consultation_id)
+        .bind(&content.chief_complaint)
+        .bind(&content.present_illness)
+        .bind(&content.diagnosis)
+        .bind(&content.treatment_plan)
+        .bind(&content.doctor_advice)
+        .bind(&content.key_points)
+        .bind(generated_by)
+        .bind(message_count)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await?;
+
+        sqlx::query_as::<_, ConsultationSummary>(
+            r#"
+            SELECT id, consultation_id, chief_complaint, present_illness,
+                   diagnosis, treatment_plan, doctor_advice, key_points,
+                   generated_by, message_count, created_at, updated_at
+            FROM consultation_summaries WHERE id = ?
+            "#
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await?
+    };
+
+    Ok(summary)
+}
+
+pub async fn get_summary_by_consultation(
+    pool: &SqlitePool,
+    consultation_id: &str,
+) -> Result<Option<ConsultationSummary>, sqlx::Error> {
+    let summary = sqlx::query_as::<_, ConsultationSummary>(
+        r#"
+        SELECT id, consultation_id, chief_complaint, present_illness,
+               diagnosis, treatment_plan, doctor_advice, key_points,
+               generated_by, message_count, created_at, updated_at
+        FROM consultation_summaries WHERE consultation_id = ?
+        "#
+    )
+    .bind(consultation_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(summary)
+}
+
+pub async fn get_all_messages_for_summary(
+    pool: &SqlitePool,
+    consultation_id: &str,
+) -> Result<Vec<ChatMessage>, sqlx::Error> {
+    let messages = sqlx::query_as::<_, ChatMessage>(
+        r#"
+        SELECT id, consultation_id, sender_id, receiver_id,
+               sender_role, message_type, content, image_url, created_at
+        FROM chat_messages
+        WHERE consultation_id = ?
+        ORDER BY created_at ASC, id ASC
+        "#
+    )
+    .bind(consultation_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(messages)
+}
