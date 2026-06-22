@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.env.local
+*.db
+*.db-journal
+medical_chat.db
+medical_chat.db-*

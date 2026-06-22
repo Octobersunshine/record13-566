@@ -1,0 +1,23 @@
+[package]
+name = "medical-chat"
+version = "0.1.0"
+edition = "2021"
+description = "医患图文消息服务 - 保存医患消息存储与历史记录分页查询"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "chrono", "uuid"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+dotenv = "0.15"
+anyhow = "1"
+thiserror = "1"
+
+[profile.release]
+opt-level = 3
